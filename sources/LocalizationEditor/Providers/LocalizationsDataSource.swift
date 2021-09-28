@@ -15,6 +15,7 @@ typealias LocalizationsDataSourceData = ([String], String?, [LocalizationGroup])
 enum Filter: Int, CaseIterable, CustomStringConvertible {
     case all
     case missing
+    case autotranslated
 
     var description: String {
         switch self {
@@ -22,6 +23,8 @@ enum Filter: Int, CaseIterable, CustomStringConvertible {
             return "all".localized
         case .missing:
             return "missing".localized
+        case .autotranslated:
+            return "autotranslated".localized
         }
     }
 }
@@ -125,6 +128,8 @@ final class LocalizationsDataSource: NSObject {
         return languages
     }
 
+    func currentLocalizationGroupName() -> String? { selectedLocalizationGroup?.name }
+
     /**
      Filters the data by given filter and search string. Empty search string means all data us included.
 
@@ -133,10 +138,19 @@ final class LocalizationsDataSource: NSObject {
     func filter(by filter: Filter, searchString: String?) {
         os_log("Filtering by %@", type: OSLogType.debug, "\(filter)")
 
-        // first use filter, missing translation is a translation that is missing in any language for the given key
-        let data = filter == .all ? self.data: self.data.filter({ dict in
-            return dict.value.keys.count != self.languagesCount || !dict.value.values.allSatisfy({ $0?.value.isEmpty == false })
-        })
+        let data: [String: [String: LocalizationString?]]
+        switch filter {
+            // no filtering
+            case .all: data = self.data
+            // filter all locKeys, that have missing localizations
+            case .missing: data = self.data.filter { dict in
+                return dict.value.keys.count != self.languagesCount || !dict.value.values.allSatisfy({ $0?.value.isEmpty == false })
+            }
+            // filter all locKeys that have autotranslated tag in message
+            case .autotranslated: data = self.data.filter { (locKey, locPairs) in
+                locPairs.contains { $0.value?.message?.contains(kAutotranslatedTag) ?? false }
+            }
+        }
 
         // no search string, just use teh filtered data
         guard let searchString = searchString, !searchString.isEmpty else {
@@ -208,6 +222,8 @@ final class LocalizationsDataSource: NSObject {
         return localization
     }
 
+    func getLocalizations(forKey locKey: String) -> [String: LocalizationString?]? { data[locKey] }
+
     /**
      Updates given localization values in given language
 
@@ -232,10 +248,23 @@ final class LocalizationsDataSource: NSObject {
             return
         }
 
-        selectedLocalizationGroup.localizations.forEach({ localization in
+        selectedLocalizationGroup.localizations.forEach { localization in
             self.localizationProvider.deleteKeyFromLocalization(localization: localization, key: key)
-        })
+        }
         data.removeValue(forKey: key)
+    }
+
+    func deleteAutotranslations(forKey locKey: String) {
+        (data[locKey]?.filter { $0.value?.message?.contains(kAutotranslatedTag) ?? false })?
+            .forEach { (locLang, locString) in
+                guard locString?.message?.contains(kAutotranslatedTag) ?? false else { return }
+                updateLocalization(language: locLang,
+                                   key: locKey,
+                                   with: "",
+                                   message: locString?.message?.replacingOccurrences(of: kAutotranslatedTag, with: ""))
+                locString?.update(newValue: "")
+                locString?.updateMessage(locString?.message?.replacingOccurrences(of: kAutotranslatedTag, with: ""))
+        }
     }
 
     /**
@@ -270,6 +299,14 @@ final class LocalizationsDataSource: NSObject {
      */
     func getRowForKey(key: String) -> Int? {
         return filteredKeys.firstIndex(of: key)
+    }
+}
+
+extension LocalizationsDataSource {
+    func getIncompleteLocalizations() -> [String: [String: LocalizationString?]] {
+        return data.filter { locKey, locPair in
+            (locPair.contains { lang, loc in loc == nil || (loc?.value.isEmpty ?? true) })
+        }
     }
 }
 

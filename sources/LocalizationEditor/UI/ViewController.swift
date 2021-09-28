@@ -47,6 +47,20 @@ final class ViewController: NSViewController {
     private var currentSearchTerm: String = ""
     private let dataSource = LocalizationsDataSource()
     private var presendedAddViewController: AddViewController?
+    private let autoTranslator = AutoTranslator()
+
+    private(set) var autoTranslationInProgress: Bool = false {
+        didSet {
+            tableView.isEnabled = !autoTranslationInProgress
+            tableView.alphaValue = autoTranslationInProgress ? 0.3 : 1
+            if autoTranslationInProgress {
+                progressIndicator.startAnimation(self)
+            } else {
+                progressIndicator.stopAnimation(self)
+            }
+            view.window?.toolbar?.validateVisibleItems()
+        }
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -162,7 +176,10 @@ extension ViewController: NSTableViewDelegate {
         case FixedColumn.actions.rawValue:
             let cell = tableView.makeView(withIdentifier: NSUserInterfaceItemIdentifier(rawValue: ActionsCell.identifier), owner: self)! as! ActionsCell
             cell.delegate = self
-            cell.key = dataSource.getKey(row: row)
+            let key = dataSource.getKey(row: row)
+            cell.key = key
+            cell.hasAutotranslations = dataSource.getLocalizations(forKey: key ?? "")?
+                .contains { $0.value?.message?.contains(kAutotranslatedTag) ?? false } ?? false
             return cell
         default:
             let language = identifier.rawValue
@@ -188,6 +205,15 @@ extension ViewController: LocalizationCellDelegate {
 extension ViewController: ActionsCellDelegate {
     func userDidRequestRemoval(of key: String) {
         dataSource.deleteLocalization(key: key)
+
+        // reload keeping scroll position
+        let rect = tableView.visibleRect
+        filter()
+        tableView.scrollToVisible(rect)
+    }
+
+    func userDidRequestAutotranslateRemoval(of key: String) {
+        dataSource.deleteAutotranslations(forKey: key)
 
         // reload keeping scroll position
         let rect = tableView.visibleRect
@@ -252,6 +278,41 @@ extension ViewController: WindowControllerToolbarDelegate {
      */
     func userDidRequestFolderOpen() {
         openFolder()
+    }
+
+    func userDidRequestGenerateTranslations() {
+        let incompleteLocalizations = dataSource.getIncompleteLocalizations()
+        guard !incompleteLocalizations.isEmpty else {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "everything_localized_title".localized
+            alert.informativeText = "everything_localized_text".localized
+            alert.runModal()
+            return
+        }
+
+        autoTranslationInProgress = true
+        autoTranslator.makePreparations(on: self) { translator in
+            translator.makeTranslations(for: incompleteLocalizations) { [weak self] pack in
+                for (locKey, locPair) in pack {
+                    for (locLang, locString) in locPair {
+                        guard let locString = locString else { continue }
+                        self?.dataSource.updateLocalization(language: locLang, key: locKey, with: locString.value, message: locString.message)
+                    }
+                }
+                self?.autoTranslationInProgress = false
+                if let locGroupName = self?.dataSource.currentLocalizationGroupName(),
+                   let languages = self?.dataSource.selectGroupAndGetLanguages(for: locGroupName) {
+                    self?.reloadData(with: languages, title: locGroupName)
+                }
+            } onError: { [weak self] error in
+                self?.autoTranslationInProgress = false
+                NSAlert(error: error).runModal()
+            }
+        } onError: { [weak self] error in
+            self?.autoTranslationInProgress = false
+            NSAlert(error: error).runModal()
+        }
     }
 }
 
